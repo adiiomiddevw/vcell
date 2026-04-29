@@ -1,5 +1,52 @@
-import { Readable as R, pipeline as P } from "node:stream/promises";
-const B = (process.env.STORAGE_URL || "").replace(/\/$/, "");
-const X = new Set(["host","connection","keep-alive","proxy-*","te","trailer","transfer-encoding","upgrade"]);
-export const config = { api: { bodyParser: !1 }, supportsResponseStreaming: !0, maxDuration: 0x1e };
-export default async function h(req,res){if(!B)return res.status(0x1f4).end("cfg err");try{const u=B+req.url,h={};let c=null;for(let k of Object.keys(req.headers)){let l=k.toLowerCase(),v=req.headers[k];if(X.has(l)||l.startsWith("x-vercel-"))continue;if(l==="x-real-ip"){c=v;continue}if(l==="x-forwarded-for"){if(!c)c=v;continue}h[l]=Array.isArray(v)?v.join(", "):v}c&&(h["x-forwarded-for"]=c);const m=req.method,n=m!=="GET"&&m!=="HEAD",f={method:m,headers:h,redirect:"manual"};n&&(f.body=R.toWeb(req),f.duplex="half");const a=await fetch(u,f);res.status(a.status);for(let[k,v]of a.headers)if(k.toLowerCase()!=="transfer-encoding")try{res.setHeader(k,v)}catch(e){}a.body?await P(R.fromWeb(a.body),res):res.end()}catch(e){res.status(0x1f6).end("bad gateway")}}
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+
+export const config = {
+  api: { bodyParser: false },
+  supportsResponseStreaming: true,
+  maxDuration: 60,
+};
+
+const TARGET_BASE = (process.env.STORAGE_URL || "").replace(/\/$/, "");
+
+export default async function handler(req, res) {
+  if (!TARGET_BASE) {
+    res.statusCode = 500;
+    return res.end("Missing config");
+  }
+
+  try {
+    const targetUrl = TARGET_BASE + req.url;
+    const headers = {};
+
+    for (const [key, value] of Object.entries(req.headers)) {
+      const lowerKey = key.toLowerCase();
+      if (["host", "connection", "transfer-encoding"].includes(lowerKey)) continue;
+      headers[lowerKey] = Array.isArray(value) ? value.join(", ") : value;
+    }
+
+    const response = await fetch(targetUrl, {
+      method: req.method,
+      headers: headers,
+      body: req.method !== "GET" && req.method !== "HEAD" ? Readable.toWeb(req) : undefined,
+      duplex: "half"
+    });
+
+    res.statusCode = response.status;
+    for (const [key, value] of response.headers) {
+      if (key.toLowerCase() !== "transfer-encoding") {
+        res.setHeader(key, value);
+      }
+    }
+
+    if (response.body) {
+      await pipeline(Readable.fromWeb(response.body), res);
+    } else {
+      res.end();
+    }
+  } catch (err) {
+    console.error(err);
+    res.statusCode = 502;
+    res.end("Proxy error");
+  }
+}
