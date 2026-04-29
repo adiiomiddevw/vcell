@@ -1,44 +1,86 @@
-import { Readable as R, pipeline as P } from "node:stream/promises";
+import { Readable as _stream_readable } from "node:stream";
+import { pipeline as _stream_pipeline } from "node:stream/promises";
 
-const _cfg = { api: { bodyParser: !1 }, supportsResponseStreaming: !0, maxDuration: 60 };
-export const config = _cfg;
+export const config = {
+  api: { bodyParser: false },
+  supportsResponseStreaming: true,
+  maxDuration: 60,
+};
 
-const _B = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
-const _S = new Set(["host", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "forwarded", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port"]);
+const __target_base = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
 
-export default async function h(_r, _w) {
-  if (!_B) return _w.statusCode = 500, _w.end("Misconfigured: TARGET_DOMAIN is not set");
+const __strip_headers_set = new Set([
+  "host", "connection", "keep-alive", "proxy-authenticate",
+  "proxy-authorization", "te", "trailer", "transfer-encoding",
+  "upgrade", "forwarded", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port"
+]);
+
+export default async function __relay_handler(__req, __res) {
+  if (!__target_base) {
+    __res.statusCode = 500;
+    return __res.end("Misconfigured: TARGET_DOMAIN is not set");
+  }
 
   try {
-    const _u = _B + _r.url;
-    const _H = {};
-    let _ip = null;
+    const __url = __target_base + __req.url;
+    const __headers_out = {};
+    let __client_ip = null;
 
-    for (let _k of Object.keys(_r.headers)) {
-      let _l = _k.toLowerCase(), _v = _r.headers[_k];
-      if (_S.has(_l)) continue;
-      if (_l.startsWith("x-vercel-")) continue;
-      if (_l === "x-real-ip") { _ip = _v; continue; }
-      if (_l === "x-forwarded-for") { if (!_ip) _ip = _v; continue; }
-      _H[_l] = Array.isArray(_v) ? _v.join(", ") : _v;
-    }
-    if (_ip) _H["x-forwarded-for"] = _ip;
+    const __header_keys = Object.keys(__req.headers);
+    for (let __idx = 0; __idx < __header_keys.length; __idx++) {
+      const __raw_key = __header_keys[__idx];
+      const __key_lower = __raw_key.toLowerCase();
+      const __val = __req.headers[__raw_key];
 
-    const _m = _r.method, _hb = _m !== "GET" && _m !== "HEAD";
-    const _opt = { method: _m, headers: _H, redirect: "manual" };
-    if (_hb) { _opt.body = R.toWeb(_r); _opt.duplex = "half"; }
-
-    const _up = await fetch(_u, _opt);
-    _w.statusCode = _up.status;
-
-    for (let [k, v] of _up.headers) {
-      if (k.toLowerCase() === "transfer-encoding") continue;
-      try { _w.setHeader(k, v); } catch {}
+      if (__strip_headers_set.has(__key_lower)) continue;
+      if (__key_lower.startsWith("x-vercel-")) continue;
+      if (__key_lower === "x-real-ip") {
+        __client_ip = __val;
+        continue;
+      }
+      if (__key_lower === "x-forwarded-for") {
+        if (!__client_ip) __client_ip = __val;
+        continue;
+      }
+      __headers_out[__key_lower] = Array.isArray(__val) ? __val.join(", ") : __val;
     }
 
-    _up.body ? await P(R.fromWeb(_up.body), _w) : _w.end();
-  } catch (e) {
-    console.error("proxy err:", e);
-    if (!_w.headersSent) _w.statusCode = 502, _w.end("Bad Gateway: Tunnel Failed");
+    if (__client_ip) __headers_out["x-forwarded-for"] = __client_ip;
+
+    const __method = __req.method;
+    const __has_body = __method !== "GET" && __method !== "HEAD";
+
+    const __fetch_options = {
+      method: __method,
+      headers: __headers_out,
+      redirect: "manual"
+    };
+
+    if (__has_body) {
+      __fetch_options.body = _stream_readable.toWeb(__req);
+      __fetch_options.duplex = "half";
+    }
+
+    const __upstream_res = await fetch(__url, __fetch_options);
+
+    __res.statusCode = __upstream_res.status;
+
+    const __resp_headers = __upstream_res.headers;
+    for (const [__hk, __hv] of __resp_headers) {
+      if (__hk.toLowerCase() === "transfer-encoding") continue;
+      try { __res.setHeader(__hk, __hv); } catch {}
+    }
+
+    if (__upstream_res.body) {
+      await _stream_pipeline(_stream_readable.fromWeb(__upstream_res.body), __res);
+    } else {
+      __res.end();
+    }
+  } catch (__err) {
+    console.error("[relay]", __err);
+    if (!__res.headersSent) {
+      __res.statusCode = 502;
+      __res.end("Bad Gateway: Tunnel Failed");
+    }
   }
 }
